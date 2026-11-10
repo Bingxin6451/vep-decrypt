@@ -1,10 +1,15 @@
 #!/usr/bin/expect -f
-# KFC8P 打包脚本：装 PyInstaller + 下载 ffmpeg + 打包 exe
+# 在 Windows 打包机上远程执行 PyInstaller 打包的示例脚本。
+# 用法：改下面 HOST / USER / PASS，或改用 SSH key。
 set timeout 500
 log_user 1
-spawn ssh -o StrictHostKeyChecking=accept-new -J pi-router-lan a1936@192.168.5.192 "cd /d D:\\vep_decode && echo ===PIP=== && python -m pip install pyinstaller --quiet && echo PIP_OK && echo ===FFMPEG=== && curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip && echo FF_DL_OK && tar -xf ffmpeg.zip && echo FF_UNZIP_OK && copy /Y ffmpeg-*-essentials_build\\bin\\ffmpeg.exe . && echo FF_COPY_OK && echo ===PACK=== && python -m PyInstaller --onefile --name vep_decode --console --add-binary \"ffmpeg.exe;.\" decode_vep.py && echo PACK_DONE && dir dist"
+
+set HOST "USER@HOST"
+set PASS "PASSWORD"
+
+spawn ssh -o StrictHostKeyChecking=accept-new $HOST "cd /d D:\\vep_decode && echo ===PIP=== && python -m pip install pyinstaller --quiet && echo PIP_OK && echo ===FFMPEG=== && curl -L -o ffmpeg.zip https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip && echo FF_DL_OK && tar -xf ffmpeg.zip && echo FF_UNZIP_OK && copy /Y ffmpeg-*-essentials_build\\bin\\ffmpeg.exe . && echo FF_COPY_OK && echo ===PACK=== && python -m PyInstaller --onefile --name vep_decode --console --add-binary \"ffmpeg.exe;.\" decode_vep.py && echo PACK_DONE && dir dist"
 expect {
-    "password:" { send "266451\r"; exp_continue }
+    "password:" { send "$PASS\r"; exp_continue }
     timeout { puts "\n<<<TIMEOUT>>>"; exit 2 }
     eof { puts "\n<<<EOF>>>" }
 }
