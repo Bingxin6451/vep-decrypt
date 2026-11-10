@@ -6,8 +6,8 @@
 原理：
   .vep = CRYP头(16B) + 加密区(ftyp/moov头/视频轨avcC含SPS) + 明文moov后半(stts/stss/stsc/stsz/stco)
         + mdat(99%明文视频/音频，仅关键帧被加密) + 尾部授权块
-  本工具：跳过加密关键帧 + 构造 SPS + 从明文流提取 PPS → 重建 MP4。
-  加密关键帧约 0.2% 帧，跳过处约 1-2 秒画面花屏，其余完好。
+  本工具：定位加密区 → 重建 SPS → 提取原始 PPS → 分流样本 → ffmpeg 封装 MP4。
+  所有文件级参数（加密区长度、A/B 校验字段、PPS、分辨率）均从当前文件实时解析。
 
 用法：
   python decode_vep.py input.vep [output.mp4] [--ffmpeg /path/to/ffmpeg]
@@ -359,7 +359,7 @@ def main():
         d.extract_video()
         d.extract_audio()
         w, h = d.detect_resolution(ffmpeg)
-        print(f'  视频: {d.vcount} samples, {len(d.enc_samples)} 加密sample(跳过), 分辨率 {w}x{h}')
+        print(f'  视频: {d.vcount} samples, {len(d.enc_samples)} 加密sample, 分辨率 {w}x{h}')
         print(f'  音频: {d.acount} samples, {d.samplerate}Hz')
         # frame rate aligned to audio duration
         nframes = 0

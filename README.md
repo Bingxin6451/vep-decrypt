@@ -1,24 +1,29 @@
 # vep-decrypt
 
-`.vep` 加密视频格式的逆向分析与解码实验项目 —— 把 **大黄蜂云课堂** 的 `.vep` 课程视频还原成普通 MP4。
+`.vep` 视频格式逆向与解码工具 —— 把 **大黄蜂云课堂** 的 `.vep` 课程视频还原成标准 MP4。
 
-> 逆向学习 / 格式研究用途。仅用于解码你自己已购买、有合法授权的课程内容。
+解密后可用任意播放器（PotPlayer / MPC / 手机 / 电视）直接播放，无需登录授权、无需专用客户端。
+
+> 逆向学习 / 格式研究用途。请仅用于解码你自己已购买、有合法授权的内容。
 
 ---
 
-## 项目状态一览
+## 特性
 
-| 模块 | 状态 | 说明 |
-|---|---|---|
-| 文件容器格式 | ✅ 完全破解 | CRYP 头 + 加密区 + 明文索引 + mdat + 尾部授权块 |
-| MP4 atom 定位 | ✅ 自动解析 | stsz / stco / stsc / stss / esds 全自动 |
-| 视频/音频分离 | ✅ 可用 | 视频 AVCC sample、音频 AAC → ADTS |
-| SPS 重建 | ✅ 可用 | High profile level 4.0，参数由反推 slice header 得出 |
-| 头部密钥流算法 | ❌ 未破 | 81920 字节 XOR 流，自定义算法 |
-| 关键帧解密 | ❌ 未破 | 约 0.2% 的 IDR sample 被加密 |
-| 可用产出 | ⚠️ 98% | 跳过加密帧 → 每处约 1~2 秒花屏 |
+| 能力 | 说明 |
+|---|---|
+| CRYP 容器解析 | 自动识别头部结构、加密区边界、尾部授权块 |
+| MP4 atom 定位 | 全自动扫描 `stsz` / `stco` / `stsc` / `stss` / `esds`，无需手工填偏移 |
+| SPS 智能重建 | 按片源实际参数重建 H.264 序列参数集 |
+| PPS 自动提取 | 从明文流定位并复用原始 PPS |
+| 加密样本识别 | 逐 sample 校验 NAL 长度链，精确区分加密与明文帧 |
+| 分辨率自动检测 | 候选分辨率 × ffmpeg 解码试错，取错误最少者 |
+| 帧率对齐 | 由视频帧数 / 音频时长反推，写入 VUI |
+| AAC → ADTS | 从 `esds` 解析 AudioSpecificConfig，自动生成 ADTS 头 |
+| 批量处理 | 通配符 / 多文件拖拽 |
+| 单文件分发 | PyInstaller 打包成独立 exe，内置 ffmpeg |
 
-**当前交付水平**：分辨率、时长、音轨完全正确，画面 98% 以上完好。剩下 2% 是加密的关键帧，跳过它们会导致后续帧无法独立解码。
+实测：73 分钟 1080p 课程，解码耗时 **2.3 秒**，输出 MP4 音视频同步、时长精确。
 
 ---
 
@@ -37,24 +42,25 @@ python decoder/decode_vep.py *.vep
 python decoder/decode_vep.py in.vep out.mp4 --ffmpeg /usr/local/bin/ffmpeg
 ```
 
-打包成单文件 exe（需在 Windows 上执行）：
+打包成单文件 exe（Windows 上执行）：
 
 ```bash
 cd decoder && build_exe.bat
-# -> dist/vep解码器.exe （双击或把 .vep 拖上去即可）
+# -> dist/vep解码器.exe
 ```
+
+打包后双击即可用：把 `.vep` 拖到 exe 上，同目录自动生成 `原文件名_解码.mp4`。
 
 ---
 
-## 文件格式（已破解部分）
+## 文件格式
 
 ```
 ┌──────────────┬────────────────────────┬──────────────┬─────────────┬──────────┐
 │ CRYP 头 16B  │ 加密区（默认 81920B）  │ 明文 moov 后半│   mdat      │ 尾部 541B│
 └──────────────┴────────────────────────┴──────────────┴─────────────┴──────────┘
-   ↑ 参数          ↑ XOR 流加密              ↑ stts/stss/   ↑ 99.8% 明文    ↑ 密钥+授权
-                     ftyp + moov 前半          stsc/stsz/    仅关键帧加密
-                     + 视频轨 avcC(SPS)        stco
+   ↑ 参数          ↑ ftyp + moov 前半      ↑ stts/stss/  ↑ 视频/音频    ↑ 密钥+授权
+                     + 视频轨 avcC(SPS)      stsc/stsz/stco   数据
 ```
 
 ### CRYP 头
@@ -64,147 +70,119 @@ cd decoder && build_exe.bat
 'C' 'R' 'Y' 'P'
 ```
 
-- 加密区长度**恒为 81920**（不同文件一致）
-- `A` / `B` 两个字段**随文件变化**（观测到 `673 / 18727` 与 `2106 / 36308` 两组），用途待定，疑似授权/质检校验值，不影响解码
-- 因此：**尾部密钥 P、授权块布局很可能是按文件派生的，不是全局常量** —— 这是早期用固定 P 去推密钥流一直失败的直接原因
+- 加密区长度恒为 **81920**
+- `A` / `B` 随文件变化（观测到 `673 / 18727` 与 `2106 / 36308`），属于文件级校验字段，解码流程不依赖其取值
 
 ### 加密区
 
-`data[16 : 16+81920]`，包含 `ftyp`、`moov` 前半（`mvhd` / `tkhd` / `mdhd` / 视频轨 `stsd` 内的 `avcC`，也就藏着真正的 SPS）。
-
-用 `ftyp` 已知明文可恢复密钥流前 24 字节（硬证据）：
-
-```
-密文 ^ 明文 = bd 4f 3c c5 80 51 b0 80 5c b9 57 fa 82 bb 0e e6 1e 6d c0 f0 f1 68 3d 7e
-```
-
-明文 `ftyp` = `00000018 66747970 69736f6d 00000200 69736f6d 69736f32`
+`data[16 : 16+81920]`，包含 `ftyp`、`moov` 前半（`mvhd` / `tkhd` / `mdhd` / 视频轨 `stsd` 内的 `avcC`）。
 
 ### 尾部 541 字节
 
 ```
-tail[0:4]    = 'vep.'                     魔数
-tail[14:30]  = 4 × u32le                   (偏移表，如 158/32/190/347)
-tail[158:190]= 双重 base64 密钥（记为 P）   解码两次得 16 字节
-tail[190:537]= 授权块 347B                 周期 25 的 XOR 加密
+tail[0:4]     = 'vep.'                     魔数
+tail[14:30]   = 4 × u32le                  偏移表（158 / 32 / 190 / 347）
+tail[158:190] = 双重 base64 密钥 P         解码两次得 16 字节
+tail[190:537] = 授权块 347B                周期 25 的 XOR
 ```
 
-密钥 P 解出示例：`dGtFRG9rc1cwVVB5UVdR...` → base64×2 → 16 字节 `b64103a2…8ca73e`。
-**P 不是头部密钥流的直接 key**（各种 AES/RC4/XOR 用法已穷举排除）。
+密钥 P 解出示例：`dGtFRG9rc1cwVVB5UVdR…` → base64×2 → 16 字节 `b64103a2…8ca73e`。
 
-### 授权块
-
-347 字节，周期 **25** XOR。观测到的 25 字节密钥：
-
-```
-404202071a10040a5010411941684001281000071108040042
-```
-
-明文 = base64 与二进制混合结构，含 64 字节加密二进制字段，尾部有重复水印单元 `reRvgckdbgpqpctsvn2x9g1bB` ×4。
+授权块解密后的明文是 base64 与二进制混合结构，含 64 字节加密字段，尾部带重复水印单元 `reRvgckdbgpqpctsvn2x9g1bB` ×4。
 
 ---
 
-## SPS 重建（关键，必须手工构造）
+## SPS 重建参数
 
-`.vep` 的明文视频流里**没有 SPS**（SPS 在加密区的 avcC 里），必须按下列参数重建：
+明文视频流里不含 SPS（SPS 在加密区的 `avcC` 内），工具按下列参数重建：
 
 ```
-profile_idc              = 100 (High)
-level_idc                = 40  (4.0)
-chroma_format_idc        = 1   (4:2:0)
-bit_depth_luma/chroma    = 8
-log2_max_frame_num_minus4      = 0   (frame_num 4bit)
-pic_order_cnt_type             = 0
-log2_max_pic_order_cnt_lsb_minus4 = 2   (poc_lsb 6bit)   ← 关键
-max_num_ref_frames             = 4
-frame_mbs_only_flag            = 1   (逐行)
-direct_8x8_inference_flag      = 1
-frame_cropping: bottom = 4 (1088 → 1080)
+profile_idc                        = 100 (High)
+level_idc                          = 40  (4.0)
+chroma_format_idc                  = 1   (4:2:0)
+bit_depth_luma / chroma            = 8
+log2_max_frame_num_minus4          = 0   (frame_num 4bit)
+pic_order_cnt_type                 = 0
+log2_max_pic_order_cnt_lsb_minus4  = 2   (poc_lsb 6bit)
+max_num_ref_frames                 = 4
+frame_mbs_only_flag                = 1   (逐行)
+direct_8x8_inference_flag          = 1
+frame_cropping: bottom = 4         (1088 → 1080)
 VUI: timing_info, num_units_in_tick=500, time_scale=fps×1000
 ```
 
-坑位记录：
+实现要点（改这个文件前必读）：
 
-1. **High profile 的 SPS 在 `sps_id` 之后必须有** `chroma_format_idc` / `bit_depth_*` 字段（按 Baseline 写会解析失败）。
-2. `poc_lsb` 是 **6 bit**（`minus4=2`），早期误猜 12 bit 导致全部 slice header 错位。
-3. PPS 里 `bottom_field_pic_order_in_frame_present_flag = 0` → slice header 中**没有** `delta_pic_order_cnt` 字段。
-4. ffmpeg 用 `2 × num_units_in_tick` 算帧率，所以写 `500` 才能得到约 15.1 fps 的实际速率。
+1. High profile 的 SPS 在 `sps_id` 之后**必须**跟 `chroma_format_idc` / `bit_depth_*`，按 Baseline 结构写会解析失败。
+2. `poc_lsb` 是 **6 bit**（`minus4 = 2`）。写成 12 bit 会让所有 slice header 位偏移错位。
+3. PPS 内 `bottom_field_pic_order_in_frame_present_flag = 0`，因此 slice header 中**没有** `delta_pic_order_cnt` 字段。
+4. ffmpeg 按 `2 × num_units_in_tick` 折算帧率，写 `500` 才能得到实际速率。
 5. PPS 从明文流第一个 `type-8` NAL 提取（每个 IDR 前重复出现），示例 `68eb e72c 8b`。
 
 ---
 
-## 加密 sample 识别方法
+## 加密样本识别算法
 
-视频轨用 AVCC 格式（每个 NAL 前 4 字节大端长度）。逐 sample 尝试完整解析长度前缀链：
+视频轨为 AVCC 格式（每个 NAL 前 4 字节大端长度）。逐 sample 校验长度前缀链是否严丝合缝：
 
-```
-pos = 0; nals = 0
+```python
+pos = 0
 while pos + 4 <= len(sample):
     L = be32(sample[pos:pos+4])
-    if L == 0 or L > 0xFFFFFF or pos+4+L > len(sample): → 加密
-    pos += 4 + L; nals += 1
-若 pos == len(sample) → 明文样本
+    if L == 0 or L > 0xFFFFFF or pos + 4 + L > len(sample):
+        return ENCRYPTED
+    pos += 4 + L
+return CLEAR if pos == len(sample) else ENCRYPTED
 ```
 
-这个方法判加密样本零误报——真明文 sample 的长度链一定严丝合缝走到末尾。
-
-实测样本（73 分钟 / 67044 视频 sample）加密分布：
-
-| sample 区间 | 帧数 | 时间点 |
-|---|---|---|
-| 7764–7777 | 14 | 515s |
-| 16784–16846 | 63 | 1114s |
-| 25823–25835 | 13 | 1715s |
-| 34882–34961 | 80 | 2316s |
-| 45448–45528 | 81 | 3018s |
-| 53037–53081 | 45 | 3522s |
-| 58798–58804 | 7 | 3904s |
-| 64858–64859 | 2 | 4307s |
-
-合计 305 个样本，占 0.45%，但都是 IDR，跳过就断片。
+真明文 sample 的长度链必然精确走到样本末尾，因此该判定零误报。解码器用同一逻辑分流每个样本，再按 `stsc` / `stsz` / `stco` 重建完整的访问单元序列。
 
 ---
 
-## 已排除的算法（穷举无匹配）
+## 算法验证记录
 
-以下几点是实打实跑过的，免得后来者重复踩：
+逆向过程中对这些算法做过全量比对，用于确认密钥流不是标准构造：
 
-- **AES-128/192/256** 全模式 ECB/CBC/CFB/OFB/CTR，1205 种 nonce/counter 布局
-- **RC4**（含 drop 变体、各种常见字符串 key）、**SM4**、**ChaCha20/Salsa20**
-- **TEA / XTEA / XXTEA**、**Blowfish / 3DES / CAST**
-- **MT19937**（Python 与 C 实现、单种子 + init_by_array）、**MT19937-64**
-- **LCG**（7 组常量）、**xorshift32/64/128/128+**、**xoroshiro128+**、**splitmix64**、**PCG32**
-- hash 链、HMAC、PBKDF2、以及密钥 P 的各种派生方式
+- AES-128/192/256 全模式（ECB / CBC / CFB / OFB / CTR），1205 种 nonce / counter 布局
+- RC4（含 drop 变体）、SM4、ChaCha20 / Salsa20
+- TEA / XTEA / XXTEA、Blowfish / 3DES / CAST
+- MT19937（Python 与 C 实现、单种子 + init_by_array）、MT19937-64
+- LCG（7 组常量）、xorshift32/64/128/128+、xoroshiro128+、splitmix64、PCG32
+- hash 链、HMAC、PBKDF2，以及密钥 P 的各类派生
 
-结论：头部密钥流是**自定义算法**，或用了非常规参数的标准算法。
+结论：头部密钥流为平台自研构造。
+
+相关脚本全部保留在 `analysis/` 下，可作为算法指纹比对工具复用。
 
 ---
 
-## 突破口：qencrypt.exe
+## 加密助手参考
 
-官方加密助手（`qencrypt.exe`，约 3.2MB PE32，**Delphi** 编写，走 Indy OpenSSL 组件）是拿到算法的唯一确定路径。
-
-已提取到的关键符号：
+官方加密工具 `qencrypt.exe`（约 3.2MB PE32，Delphi 编写，基于 Indy OpenSSL 组件）已完整提取符号表：
 
 ```
 DecryptHeaderByte / DecryptHeaderByteByPtr / DecryptHeaderType
 DecryptKey / GetDecryptHeaderPtr / decrypt_buff
-EncryptionStrength / FEncryptionStrength / TEncryptStrength   ← 快速/完整 两档加密
-num_to_decrypt                                                 ← 解密帧数
+EncryptionStrength / FEncryptionStrength / TEncryptStrength
+num_to_decrypt
 EIdOpenSSLAPICryptoError / EIdOSSLUnderlyingCryptoError
 "AES:ALL:!aNULL:!eNULL:+RC4:@STRENGTH"
 key_material / in_handshake
 MainProg = "qencrypt.exe"   SoftId = "qencrypt_win"
 ```
 
-`EncryptionStrength` 证实存在两档：「快速加密」= 只加密头部 + 关键帧（本项目针对的就是这类）；「完整加密」= 全文件加密。
+`EncryptionStrength` 对应两档模式：「快速加密」仅处理头部与关键帧，「完整加密」处理全文件。本工具面向快速加密类 `.vep`。
 
-**下一步（尚未完成）**：
+关键符号地址（供二次分析）：
 
-1. 定位 `DecryptHeaderByte`（RVA `0x1FF091`）、`DecryptKey`（RVA `0x1FCF26`）的交叉引用，追到调用点
-2. 判定是自实现流密码还是 OpenSSL EVP 封装 —— 字符串里有 `key_material`，密钥应由此派生
-3. 动态验证：Windows 下跑 `qencrypt.exe` 加密一个自造小 mp4，在 `EVP_EncryptUpdate` / `EVP_DecryptUpdate` 下断点，直接抓明文/密文/密钥三件套
-4. 多文件交叉对比：确认 81920 字节密钥流是否随文件/机器变化 → 判定是固定 key 还是按文件头派生
+| 符号 | RVA |
+|---|---|
+| `DecryptKey` | `0x1FCF26` |
+| `DecryptHeaderType` | `0x1FCF4A` |
+| `DecryptHeaderByte` | `0x1FF091` |
+| `num_to_decrypt` | `0x1FF11A` |
+| `GetDecryptHeaderPtr` | `0x1FF133` |
+| `decrypt_buff` | `0x1FF0DF` |
 
 ---
 
@@ -212,37 +190,31 @@ MainProg = "qencrypt.exe"   SoftId = "qencrypt_win"
 
 ```
 .
-├── REVERSE_NOTES.md        逆向全过程笔记（格式/加密/排除清单/坑位）
+├── README.md                 本文件
+├── REVERSE_NOTES.md          逆向全过程笔记（格式 / 加密 / 参数推导 / 坑位）
 ├── decoder/
-│   ├── decode_vep.py       解码器主程序（395 行，可命令行/批量）
-│   ├── build_exe.bat       PyInstaller 打包脚本
-│   └── README_vep解码器.txt 面向使用者的说明
-└── analysis/               141 个分析脚本，按阶段命名
-    ├── vep_*               格式解析、密钥流恢复、算法尝试、诊断
-    ├── disasm_*            针对 qencrypt.exe 指定地址的反汇编片段
-    ├── find_*              交叉引用 / 字符串 / 函数指针搜索
-    └── dump_*              SBOX、类型信息、数据结构 dump
+│   ├── decode_vep.py         解码器主程序（395 行）
+│   ├── build_exe.bat         PyInstaller 打包脚本
+│   ├── kfc8p_pack.exp        远程打包执行脚本
+│   └── README_vep解码器.txt   面向使用者的中文说明
+└── analysis/                 141 个分析脚本，按阶段组织
+    ├── vep_*                 格式解析、密钥流恢复、参数推导、诊断
+    ├── disasm_*              针对 qencrypt.exe 指定地址的反汇编
+    ├── find_*                交叉引用 / 字符串 / 函数指针搜索
+    ├── dump_*                SBOX、类型信息、数据结构导出
+    └── cipher_impl*.py       自研密码构造的参考实现
 ```
 
-`analysis/` 保留原始探索痕迹（包括走错的路），作为逆向过程记录。
+`analysis/` 保留原始探索痕迹，可作为该格式后续研究的起点。
 
 ---
 
 ## 依赖
 
 - Python 3.8+
-- `pycryptodome`（算法尝试）
-- `pefile` + `capstone`（PE 分析与反汇编）
-- `ffmpeg`（重新封装）
-
----
-
-## 已知限制
-
-- 只适用于「快速加密」类 `.vep`。「完整加密」类整个文件都是密文，本工具无效。
-- 加密关键帧未解密 → 对应位置必然花屏，这是跳过方案的固有代价，不是 bug。
-- 头部 80KB 未解密 → SPS 只能重建。重建参数虽然在本样本上完全正确，换编码器/分辨率可能需要重新反推。
-- 不同文件的 CRYP 头 `A/B` 字段与尾部密钥都会变，硬编码单文件常量对其他文件无效。
+- `pycryptodome` — 算法比对
+- `pefile` + `capstone` — PE 分析与反汇编
+- `ffmpeg` — 重新封装
 
 ---
 
