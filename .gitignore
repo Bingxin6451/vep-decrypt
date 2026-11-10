@@ -1,0 +1,25 @@
+# 样本与二进制（版权 / 体积原因不入库）
+samples/
+*.vep
+*.bin
+*.exe
+*.mp4
+*.aac
+*.h264
+*.ts
+
+# 分析中间产物
+*.h
+*.dump
+*.json.gz
+/tmp/
+
+# Python
+__pycache__/
+*.pyc
+build/
+dist/
+*.spec
+
+# macOS
+.DS_Store
